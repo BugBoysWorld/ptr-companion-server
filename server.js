@@ -151,15 +151,14 @@ wss.on('connection', ws => {
       // ── PLAYER JOINS A ROOM ─────────────────────────────────────
       case 'join_room': {
         const r = rooms[msg.code];
-        if (!r) { send(ws, { type: 'error', msg: 'Room not found.' }); break; }
-        if (r.started && !msg.rejoin) {
-          send(ws, { type: 'error', msg: 'Game already started.' }); break;
-        }
+        if (!r) { send(ws, { type: 'error', msg: 'Room not found. Check the code and try again.' }); break; }
 
-        // Check if this is a rejoin (same name + same slot)
-        const existing = r.players.find(p => p.name === msg.playerName && !p.connected);
+        // ── REJOIN: check for matching disconnected player FIRST
+        // This works whether or not they sent rejoin:true — name match is enough
+        const existing = r.players.find(p =>
+          p.name === msg.playerName && !p.connected
+        );
         if (existing) {
-          // Reconnect to existing slot
           existing.connected = true;
           existing.ws = ws;
           playerId = existing.id;
@@ -172,15 +171,27 @@ wss.on('connection', ws => {
             started: r.started
           });
           broadcast(r, { type: 'player_reconnected', playerId: existing.id, playerName: existing.name }, existing.id);
-          console.log(`${msg.playerName} reconnected to room ${msg.code}`);
+          console.log(`${msg.playerName} rejoined room ${msg.code} (slot ${existing.id})`);
           break;
         }
 
-        // New join
+        // ── BLOCK new players from joining a started game
+        if (r.started) {
+          // Give a helpful message explaining how to rejoin
+          const names = r.players.map(p => p.name).join(', ');
+          send(ws, {
+            type: 'error',
+            msg: `Game already started. To rejoin, your name must exactly match one of the players: ${names}`
+          });
+          break;
+        }
+
+        // ── BLOCK if room is full
         if (r.players.length >= r.numPlayers) {
           send(ws, { type: 'error', msg: 'Room is full.' }); break;
         }
 
+        // ── NEW JOIN (pre-game lobby)
         playerId = r.players.length;
         room = r;
         r.players.push({
@@ -200,7 +211,6 @@ wss.on('connection', ws => {
           started: r.started
         });
 
-        // Tell everyone else
         broadcast(r, {
           type: 'player_joined',
           playerId,
@@ -426,15 +436,25 @@ wss.on('connection', ws => {
       broadcast(room, { type: 'player_disconnected', playerId, playerName: p.name }, playerId);
       console.log(`${p.name} disconnected from room ${room.code}`);
     }
-    // Clean up empty rooms after 2 hours
+
     const allGone = room.players.every(p => !p.connected);
     if (allGone) {
+      // Tiered cleanup:
+      // - Never started (abandoned lobby): 30 minutes
+      // - Started but everyone left: 2 hours
+      const delay = room.started
+        ? 2 * 60 * 60 * 1000    // 2 hours
+        : 30 * 60 * 1000;        // 30 minutes
+
+      const label = room.started ? '2hr' : '30min';
+      console.log(`Room ${room.code} all disconnected — cleanup in ${label}`);
+
       setTimeout(() => {
         if (rooms[room.code] && room.players.every(p => !p.connected)) {
           delete rooms[room.code];
-          console.log(`Room ${room.code} cleaned up`);
+          console.log(`Room ${room.code} cleaned up (${label} timeout)`);
         }
-      }, 2 * 60 * 60 * 1000);
+      }, delay);
     }
   });
 
@@ -448,11 +468,15 @@ server.listen(PORT, () => {
 
 // ── CLEANUP: remove stale rooms every hour ───────────────────────
 setInterval(() => {
-  const cutoff = Date.now() - (12 * 60 * 60 * 1000); // 12 hours
+  const now = Date.now();
+  const cutoff12h = now - (12 * 60 * 60 * 1000);
+  let cleaned = 0;
   Object.entries(rooms).forEach(([code, r]) => {
-    if (r.createdAt < cutoff) {
+    if (r.createdAt < cutoff12h) {
       delete rooms[code];
-      console.log(`Stale room ${code} removed`);
+      cleaned++;
     }
   });
+  if (cleaned > 0) console.log(`Periodic cleanup: removed ${cleaned} stale room(s)`);
+  console.log(`Active rooms: ${Object.keys(rooms).length}`);
 }, 60 * 60 * 1000);
