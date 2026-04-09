@@ -229,7 +229,24 @@ wss.on('connection', ws => {
         if (!room || playerId !== room.hostId) break;
         room.started = true;
 
-        // Store the game_start event — uses same format as the .md log
+        // Fill placeholder slots for any players who haven't joined yet.
+        // The host manages their clue tokens manually during play.
+        while (room.players.length < room.numPlayers) {
+          const slotId = room.players.length;
+          const slotName = (msg.playerNames && msg.playerNames[slotId]) || `Player ${slotId + 1}`;
+          const slotDiff = (msg.playerDiffs && msg.playerDiffs[slotId]) || 'hard';
+          room.players.push({
+            id: slotId,
+            name: slotName,
+            diff: slotDiff,
+            connected: false,
+            lastTilePlaced: false,
+            ws: null
+          });
+          console.log(`Room ${room.code}: placeholder created for ${slotName} (${slotDiff})`);
+        }
+
+        // Store the game_start event
         const startEvent = {
           type: 'game_start',
           timestamp: now(),
@@ -238,8 +255,11 @@ wss.on('connection', ws => {
         };
         pushEvent(room, startEvent);
 
-        broadcastAll(room, { type: 'game_started', players: room.players.map(p => ({ id: p.id, name: p.name, diff: p.diff })) });
-        console.log(`Room ${room.code} game started`);
+        broadcastAll(room, {
+          type: 'game_started',
+          players: room.players.map(p => ({ id: p.id, name: p.name, diff: p.diff, connected: p.connected }))
+        });
+        console.log(`Room ${room.code} game started with ${room.players.length} players (${room.players.filter(p=>p.connected).length} connected)`);
         break;
       }
 
